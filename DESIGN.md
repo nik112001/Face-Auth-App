@@ -97,8 +97,18 @@ branch does not close.
 vector store (local numpy fallback, OpenSearch HNSW) behind one interface;
 1:N `/api/identify`; an event log feeding a hybrid (semantic + lexical)
 RAG index; `/api/ask` with one agentic tool (`search_events`) instead of
-prompt-stuffing the whole log; graceful degradation with no OpenSearch and
-no `ANTHROPIC_API_KEY`.
+prompt-stuffing the whole log; a pluggable LLM backend for `/api/ask`
+(hosted Claude or a local Ollama model, same tool contract either way);
+graceful degradation with no OpenSearch and no LLM backend reachable at
+all -- the endpoint returns raw retrieved snippets instead of failing.
+
+The Ollama path also surfaced a real reliability gap worth naming: a
+smaller local model is less disciplined about the tool's JSON schema than
+a frontier hosted model -- it sent `since` as the literal string `"null"`
+in testing, which `run_search_events` now sanitizes rather than trusting.
+That's a concrete illustration of a broader point: model choice isn't just
+an accuracy tradeoff, it's a tradeoff in how much defensive code the
+calling application needs around it.
 
 **Planned, not built:** calibrated thresholds from a real genuine/impostor
 dataset; authorization in front of `/api/identify` and `/api/ask`; liveness

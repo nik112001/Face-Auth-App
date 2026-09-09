@@ -19,7 +19,7 @@ A facial recognition authentication system built with **React**, **Flask**, **Op
 1. **Register** → Webcam captures your face → Flask detects it and computes a 512-d embedding → embedding enrolled in the vector store, username recorded in `users.json`
 2. **Login (1:1 verify)** → Webcam captures face again → compared by cosine similarity to *this username's* enrolled vector → returns JWT token on match
 3. **Identify (1:N)** → `/api/identify` takes a frame with no username, searches the vector store for the nearest enrolled user, and returns them if the score clears the threshold
-4. **Ask** → `/api/ask` answers questions about the auth event log by retrieving relevant events (hybrid search) and letting an LLM call a `search_events` tool to look them up, citing timestamps
+4. **Ask** → `/api/ask` answers questions about the auth event log by retrieving relevant events (hybrid search) and letting an LLM call a `search_events` tool to look them up, citing timestamps. The LLM is pluggable: hosted Claude (`LLM_BACKEND=anthropic`, the default) or a free local model via Ollama (`LLM_BACKEND=ollama`) -- see below.
 ```
 [React :3000]  ←→  [Flask :5000]  ←→  [vector store: local | OpenSearch]
                           ↓
@@ -60,6 +60,18 @@ JWT_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))") docker com
 ```
 This runs a single-node OpenSearch plus the Flask app with `VECTOR_BACKEND=opensearch`. Without Docker, the app runs fine with the local numpy fallback (`VECTOR_BACKEND=local`, the default) -- no OpenSearch required.
 
+**Running `/api/ask` locally with Ollama (free, no API key):**
+A claude.ai Pro subscription does **not** grant API access -- `ANTHROPIC_API_KEY` needs a separate, paid console.anthropic.com key. To try `/api/ask` for free instead, run the LLM locally with [Ollama](https://ollama.com):
+```bash
+brew install ollama          # or download from ollama.com
+ollama serve &                # starts the local server on :11434
+ollama pull llama3.2          # ~2GB, one-time download; supports tool calling
+
+echo "LLM_BACKEND=ollama" >> .env
+echo "OLLAMA_MODEL=llama3.2" >> .env
+```
+Not every Ollama model supports tool calling -- `llama3.2`, `llama3.1`, and `qwen2.5` are known to. Smaller local models are also noticeably less reliable than a hosted frontier model at following the tool's schema exactly (in testing, a 3B model occasionally sent `since` as the literal string `"null"` instead of omitting it); `rag.py` sanitizes that defensively rather than trusting it. If Ollama isn't running or the model isn't pulled, `/api/ask` degrades the same way it does with no Anthropic key: it returns the raw retrieved snippets with a clear note instead of failing.
+
 **Environment variables:**
 | Variable | Default | Purpose |
 |---|---|---|
@@ -68,7 +80,9 @@ This runs a single-node OpenSearch plus the Flask app with `VECTOR_BACKEND=opens
 | `VECTOR_BACKEND` | `local` | `local` (numpy fallback) or `opensearch` |
 | `OPENSEARCH_URL` | `http://localhost:9200` | Used when `VECTOR_BACKEND=opensearch` |
 | `MATCH_THRESHOLD` | `0.5` | Cosine similarity cutoff for a face match |
-| `ANTHROPIC_API_KEY` | *(optional)* | Enables LLM generation in `/api/ask`; without it, raw retrieved snippets are returned instead |
+| `LLM_BACKEND` | `anthropic` | `anthropic` (hosted) or `ollama` (local, free) for `/api/ask` |
+| `ANTHROPIC_API_KEY` | *(optional)* | Required when `LLM_BACKEND=anthropic`; without it, raw retrieved snippets are returned instead |
+| `OLLAMA_MODEL` | `llama3.2` | Used when `LLM_BACKEND=ollama`; must already be pulled |
 
 ---
 

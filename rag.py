@@ -139,9 +139,24 @@ class EventIndex:
         ]
 
 
+def _clean_since(value):
+    """Smaller local models are looser with JSON typing than a frontier
+    hosted model -- in testing, a 3B Ollama model sent since="null" (the
+    literal string) instead of omitting the field or sending real null.
+    A stray string like that would sort after every real ISO timestamp
+    and silently filter out all events, so treat anything that isn't a
+    plausible timestamp as "no filter" instead of trusting it blindly."""
+    if not value or not isinstance(value, str):
+        return None
+    if value.strip().lower() in ("null", "none", ""):
+        return None
+    return value
+
+
 def run_search_events(index, query, since=None):
     """Execute the search_events tool with a hard timeout and invocation
     logging. Returns (results, error) -- error is a string on timeout."""
+    since = _clean_since(since)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(index.search, query, since)
         try:
@@ -158,36 +173,53 @@ def run_search_events(index, query, since=None):
             return [], f"search_events timed out after {TOOL_TIMEOUT_SECONDS}s"
 
 
+def _degraded_response(initial_results, note):
+    return {
+        "answer": None,
+        "citations": [r["event"]["timestamp"] for r in initial_results],
+        "retrieved": [r["text"] for r in initial_results],
+        "note": note,
+    }
+
+
+def _tool_prompt(question):
+    return (
+        "Answer the question using only the search_events tool to look up "
+        "the face-auth event log. Cite the timestamp of every event you "
+        "rely on. If nothing relevant turns up, say so plainly instead of "
+        f"guessing.\n\nQuestion: {question}"
+    )
+
+
 def answer_question(question, events_log_path="events.log"):
+    """Dispatches to a hosted (Anthropic) or local (Ollama) LLM backend,
+    chosen by LLM_BACKEND (default "anthropic"). Both backends share the
+    same deterministic upfront relevance check and the same degraded
+    (retrieval-only) response shape when generation isn't available."""
     index = EventIndex(events_log_path)
 
     initial_results, _ = run_search_events(index, question)
     if not initial_results:
         return {"answer": None, "citations": [], "note": "No relevant events found."}
 
+    backend = os.environ.get("LLM_BACKEND", "anthropic")
+    if backend == "ollama":
+        return _answer_with_ollama(question, index, initial_results)
+    return _answer_with_anthropic(question, index, initial_results)
+
+
+def _answer_with_anthropic(question, index, initial_results):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {
-            "answer": None,
-            "citations": [r["event"]["timestamp"] for r in initial_results],
-            "retrieved": [r["text"] for r in initial_results],
-            "note": "ANTHROPIC_API_KEY is not set; returning retrieved snippets without generation.",
-        }
+        return _degraded_response(
+            initial_results,
+            "ANTHROPIC_API_KEY is not set; returning retrieved snippets without generation.",
+        )
 
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "Answer the question using only the search_events tool to look up "
-                "the face-auth event log. Cite the timestamp of every event you "
-                "rely on. If nothing relevant turns up, say so plainly instead of "
-                f"guessing.\n\nQuestion: {question}"
-            ),
-        }
-    ]
+    messages = [{"role": "user", "content": _tool_prompt(question)}]
 
     citations = set()
     for _ in range(TOOL_CALL_ROUNDS):
@@ -226,5 +258,71 @@ def answer_question(question, events_log_path="events.log"):
                 {"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(payload)}
             )
         messages.append({"role": "user", "content": tool_results})
+
+    return {"answer": None, "citations": sorted(citations), "note": "Tool-call budget exhausted."}
+
+
+def _answer_with_ollama(question, index, initial_results):
+    model = os.environ.get("OLLAMA_MODEL", "llama3.2")
+
+    try:
+        import ollama
+    except ImportError:
+        return _degraded_response(
+            initial_results,
+            "The 'ollama' package is not installed; returning retrieved snippets without generation.",
+        )
+
+    try:
+        ollama.list()  # cheap call, just to confirm a local server is reachable
+    except Exception:
+        return _degraded_response(
+            initial_results,
+            f"Could not reach a local Ollama server (LLM_BACKEND=ollama). Start it with "
+            f"`ollama serve` and make sure `{model}` is pulled, or unset LLM_BACKEND to "
+            "fall back to Anthropic.",
+        )
+
+    tool_schema = {
+        "type": "function",
+        "function": {
+            "name": SEARCH_EVENTS_SCHEMA["name"],
+            "description": SEARCH_EVENTS_SCHEMA["description"],
+            "parameters": SEARCH_EVENTS_SCHEMA["input_schema"],
+        },
+    }
+    messages = [{"role": "user", "content": _tool_prompt(question)}]
+
+    citations = set()
+    for _ in range(TOOL_CALL_ROUNDS):
+        try:
+            response = ollama.chat(model=model, messages=messages, tools=[tool_schema])
+        except Exception as e:
+            return _degraded_response(
+                initial_results, f"Ollama call failed ({e}); returning retrieved snippets without generation."
+            )
+
+        msg = response["message"]
+        if not msg.tool_calls:
+            return {"answer": msg.content, "citations": sorted(citations)}
+
+        messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": msg.tool_calls})
+
+        for call in msg.tool_calls:
+            args = call.function.arguments or {}
+            results, error = run_search_events(index, args.get("query", ""), args.get("since"))
+            for r in results:
+                citations.add(r["event"]["timestamp"])
+            if error:
+                payload = {"error": error}
+            elif not results:
+                payload = {"results": [], "note": "No relevant events found."}
+            else:
+                payload = {
+                    "results": [
+                        {"timestamp": r["event"]["timestamp"], "text": r["text"]} for r in results
+                    ]
+                }
+            messages.append({"role": "tool", "content": json.dumps(payload)})
 
     return {"answer": None, "citations": sorted(citations), "note": "Tool-call budget exhausted."}
