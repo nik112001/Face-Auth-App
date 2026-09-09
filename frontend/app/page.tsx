@@ -2,6 +2,8 @@
 
 import { useState, useRef, useCallback } from "react";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:5000";
+
 export default function Home() {
   const [mode, setMode] = useState<"home" | "register" | "login" | "success">("home");
   const [username, setUsername] = useState("");
@@ -43,7 +45,7 @@ export default function Home() {
     const image = captureImage();
     if (!image) { setError("Could not capture image"); setLoading(false); return; }
     try {
-      const res = await fetch("http://localhost:5000/api/register", {
+      const res = await fetch(`${API_BASE}/api/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, image }),
@@ -64,7 +66,7 @@ export default function Home() {
     const image = captureImage();
     if (!image) { setError("Could not capture image"); setLoading(false); return; }
     try {
-      const res = await fetch("http://localhost:5000/api/login", {
+      const res = await fetch(`${API_BASE}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, image }),

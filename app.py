@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
 import cv2
 import numpy as np
 import jwt
@@ -8,11 +9,18 @@ import os
 import json
 import base64
 
-app = Flask(__name__)
-CORS(app)
+load_dotenv()
 
-SECRET_KEY = "your-secret-key-change-in-production"
-USERS_FILE = "users.json"
+app = Flask(__name__)
+
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
+CORS(app, origins=[FRONTEND_ORIGIN])
+
+SECRET_KEY = os.environ.get("JWT_SECRET")
+if not SECRET_KEY:
+    raise RuntimeError("JWT_SECRET is not set. Copy .env.example to .env and set a random value.")
+
+USERS_FILE = os.environ.get("USERS_FILE", "users.json")
 
 # Load users from file
 def load_users():
@@ -42,7 +50,9 @@ def get_face_encoding(img):
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
     faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-    if len(faces) == 0:
+    # Reject ambiguous frames instead of silently picking the first: no face
+    # and multiple faces are both treated as "no usable encoding".
+    if len(faces) != 1:
         return None
     x, y, w, h = faces[0]
     face_img = gray[y:y+h, x:x+w]
@@ -71,10 +81,12 @@ def register():
         return jsonify({"error": "User already exists"}), 400
 
     img = decode_image(image_data)
-    encoding = get_face_encoding(img)
+    if img is None:
+        return jsonify({"error": "Image could not be decoded."}), 400
 
+    encoding = get_face_encoding(img)
     if encoding is None:
-        return jsonify({"error": "No face detected. Please try again."}), 400
+        return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
     users[username] = {"encoding": encoding}
     save_users(users)
@@ -95,10 +107,12 @@ def login():
         return jsonify({"error": "User not found"}), 404
 
     img = decode_image(image_data)
-    encoding = get_face_encoding(img)
+    if img is None:
+        return jsonify({"error": "Image could not be decoded."}), 400
 
+    encoding = get_face_encoding(img)
     if encoding is None:
-        return jsonify({"error": "No face detected. Please try again."}), 400
+        return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
     match = compare_faces(users[username]["encoding"], encoding)
 
@@ -127,4 +141,4 @@ def protected():
         return jsonify({"error": "Invalid token"}), 401
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", port=int(os.environ.get("PORT", "5000")))
