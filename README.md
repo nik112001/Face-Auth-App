@@ -16,10 +16,13 @@ A facial recognition authentication system built with **React**, **Flask**, **Op
 ---
 
 ## 📖 How It Works
+All four flows below are reachable from the home screen at `localhost:3000` -- there's no separate admin UI.
 1. **Register** → Webcam captures your face → Flask detects it and computes a 512-d embedding → embedding enrolled in the vector store, username recorded in `users.json`
-2. **Login (1:1 verify)** → Webcam captures face again → compared by cosine similarity to *this username's* enrolled vector → returns JWT token on match
-3. **Identify (1:N)** → `/api/identify` takes a frame with no username, searches the vector store for the nearest enrolled user, and returns them if the score clears the threshold
-4. **Ask** → `/api/ask` answers questions about the auth event log by retrieving relevant events (hybrid search) and letting an LLM call a `search_events` tool to look them up, citing timestamps. The LLM is pluggable: hosted Claude (`LLM_BACKEND=anthropic`, the default) or a free local model via Ollama (`LLM_BACKEND=ollama`) -- see below.
+2. **Login (1:1 verify)** → Webcam captures face again → compared by cosine similarity to *this username's* enrolled vector → returns a JWT, plus a button that calls `/api/protected` with that token to prove it actually authenticates something
+3. **Identify (1:N)** → webcam capture with **no username field** → Flask searches the vector store for the nearest enrolled user and returns them if the score clears the threshold
+4. **Ask** → a text box, no camera → answers questions about the auth event log by retrieving relevant events (hybrid search) and letting an LLM call a `search_events` tool to look them up, citing timestamps. The LLM is pluggable: hosted Claude (`LLM_BACKEND=anthropic`, the default) or a free local model via Ollama (`LLM_BACKEND=ollama`) -- see below.
+
+Every rejected attempt (undecodable image, zero/multiple faces) is logged to `events.log` too, not just successes -- a repeated bad-frame pattern is exactly the kind of thing worth being able to ask "Ask" about later.
 ```
 [React :3000]  ←→  [Flask :5000]  ←→  [vector store: local | OpenSearch]
                           ↓

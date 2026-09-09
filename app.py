@@ -16,9 +16,12 @@ from rag import answer_question
 load_dotenv()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB -- a single webcam JPEG frame is a few hundred KB
 
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
 CORS(app, origins=[FRONTEND_ORIGIN])
+
+MAX_QUESTION_LENGTH = 2000
 
 SECRET_KEY = os.environ.get("JWT_SECRET")
 if not SECRET_KEY:
@@ -98,10 +101,12 @@ def register():
 
     img = decode_image(image_data)
     if img is None:
+        log_event("register", username, None, "rejected_bad_image")
         return jsonify({"error": "Image could not be decoded."}), 400
 
     encoding = get_face_encoding(img)
     if encoding is None:
+        log_event("register", username, None, "rejected_ambiguous_face")
         return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
     store.enroll(username, encoding)
@@ -126,10 +131,12 @@ def login():
 
     img = decode_image(image_data)
     if img is None:
+        log_event("login", username, None, "rejected_bad_image")
         return jsonify({"error": "Image could not be decoded."}), 400
 
     encoding = get_face_encoding(img)
     if encoding is None:
+        log_event("login", username, None, "rejected_ambiguous_face")
         return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
     match, score = compare_faces(username, encoding)
@@ -159,10 +166,12 @@ def identify():
 
     img = decode_image(image_data)
     if img is None:
+        log_event("identify", None, None, "rejected_bad_image")
         return jsonify({"error": "Image could not be decoded."}), 400
 
     encoding = get_face_encoding(img)
     if encoding is None:
+        log_event("identify", None, None, "rejected_ambiguous_face")
         return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
     user_id, score = store.identify(encoding)
@@ -181,6 +190,8 @@ def ask():
 
     if not question:
         return jsonify({"error": "Question required"}), 400
+    if len(question) > MAX_QUESTION_LENGTH:
+        return jsonify({"error": f"Question is too long (max {MAX_QUESTION_LENGTH} characters)."}), 400
 
     result = answer_question(question, EVENTS_LOG)
     return jsonify(result)
