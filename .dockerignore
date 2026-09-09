@@ -1,0 +1,9 @@
+venv/
+frontend/
+.git/
+__pycache__/
+*.pyc
+.env
+users.json
+vectors_local.json
+events.log

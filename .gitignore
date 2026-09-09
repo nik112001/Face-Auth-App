@@ -1,5 +1,8 @@
 # Enrolled face data is personal and must never be committed.
 users.json
+vectors_local.json
+events.log
 .env
 venv/
 __pycache__/
+*.pyc

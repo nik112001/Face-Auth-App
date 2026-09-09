@@ -9,6 +9,10 @@ import os
 import json
 import base64
 
+from embeddings import embed_face
+from vector_store import get_store
+from rag import answer_question
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -21,6 +25,15 @@ if not SECRET_KEY:
     raise RuntimeError("JWT_SECRET is not set. Copy .env.example to .env and set a random value.")
 
 USERS_FILE = os.environ.get("USERS_FILE", "users.json")
+EVENTS_LOG = os.environ.get("EVENTS_LOG", "events.log")
+
+# 0.5 is a reasonable starting point for facenet-pytorch's VGGFace2-trained
+# cosine-similarity space (ArcFace/insightface embeddings typically need a
+# lower ~0.35 for the same decision on their own space). Not yet calibrated
+# against this project's own genuine-vs-impostor pairs -- see Roadmap.
+MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.5"))
+
+store = get_store()
 
 # Load users from file
 def load_users():
@@ -34,6 +47,17 @@ def save_users(users):
     with open(USERS_FILE, "w") as f:
         json.dump(users, f)
 
+# Append-only audit trail. Read back by the RAG endpoint in rag.py.
+def log_event(action, user_id, score, outcome):
+    with open(EVENTS_LOG, "a") as f:
+        f.write(json.dumps({
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "action": action,
+            "user_id": user_id,
+            "score": score,
+            "outcome": outcome,
+        }) + "\n")
+
 # Decode base64 image from frontend
 def decode_image(base64_string):
     if "," in base64_string:
@@ -43,29 +67,21 @@ def decode_image(base64_string):
     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     return img
 
-# Detect face and return encoding using OpenCV
+# Detect the single face in img and return its embedding as a plain list
+# (JSON-serializable) for storage. None if zero or multiple faces are found.
 def get_face_encoding(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-    # Reject ambiguous frames instead of silently picking the first: no face
-    # and multiple faces are both treated as "no usable encoding".
-    if len(faces) != 1:
+    embedding = embed_face(img)
+    if embedding is None:
         return None
-    x, y, w, h = faces[0]
-    face_img = gray[y:y+h, x:x+w]
-    face_resized = cv2.resize(face_img, (100, 100))
-    encoding = face_resized.flatten().tolist()
-    return encoding
+    return embedding.tolist()
 
-# Compare two face encodings
-def compare_faces(enc1, enc2, threshold=5000000):
-    a = np.array(enc1)
-    b = np.array(enc2)
-    diff = np.sum((a - b) ** 2)
-    return diff < threshold
+# Cosine-similarity match decision against a user's enrolled vector.
+# Delegated to the vector store (rather than comparing two arrays directly)
+# so the same code path works whether vectors live in the local numpy
+# fallback or in OpenSearch.
+def compare_faces(username, vector):
+    score = store.verify(username, vector)
+    return score >= MATCH_THRESHOLD, score
 
 @app.route("/api/register", methods=["POST"])
 def register():
@@ -88,8 +104,10 @@ def register():
     if encoding is None:
         return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
-    users[username] = {"encoding": encoding}
+    store.enroll(username, encoding)
+    users[username] = {"registered_at": datetime.datetime.utcnow().isoformat()}
     save_users(users)
+    log_event("register", username, None, "success")
 
     return jsonify({"message": f"User {username} registered successfully!"})
 
@@ -114,7 +132,7 @@ def login():
     if encoding is None:
         return jsonify({"error": "Expected exactly one face. Please try again."}), 400
 
-    match = compare_faces(users[username]["encoding"], encoding)
+    match, score = compare_faces(username, encoding)
 
     if match:
         token = jwt.encode(
@@ -125,9 +143,47 @@ def login():
             SECRET_KEY,
             algorithm="HS256",
         )
-        return jsonify({"message": "Login successful!", "token": token})
+        log_event("login", username, score, "success")
+        return jsonify({"message": "Login successful!", "token": token, "score": score})
     else:
+        log_event("login", username, score, "denied")
         return jsonify({"error": "Face does not match. Access denied."}), 401
+
+@app.route("/api/identify", methods=["POST"])
+def identify():
+    data = request.json
+    image_data = data.get("image")
+
+    if not image_data:
+        return jsonify({"error": "Image required"}), 400
+
+    img = decode_image(image_data)
+    if img is None:
+        return jsonify({"error": "Image could not be decoded."}), 400
+
+    encoding = get_face_encoding(img)
+    if encoding is None:
+        return jsonify({"error": "Expected exactly one face. Please try again."}), 400
+
+    user_id, score = store.identify(encoding)
+
+    if user_id is not None and score >= MATCH_THRESHOLD:
+        log_event("identify", user_id, score, "success")
+        return jsonify({"user_id": user_id, "score": score})
+    else:
+        log_event("identify", user_id, score, "no_match")
+        return jsonify({"error": "No match found."}), 401
+
+@app.route("/api/ask", methods=["POST"])
+def ask():
+    data = request.json
+    question = data.get("question")
+
+    if not question:
+        return jsonify({"error": "Question required"}), 400
+
+    result = answer_question(question, EVENTS_LOG)
+    return jsonify(result)
 
 @app.route("/api/protected", methods=["GET"])
 def protected():
